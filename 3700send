@@ -1,0 +1,171 @@
+#!/usr/bin/python -u
+#
+# Project 3 Code Send
+#
+
+import sys
+import socket
+import time
+import datetime
+import select
+import json
+
+MSG_SIZE = 1500
+DATA_SIZE = 1000
+TIMEOUT = 2
+SEQUENCE = 0
+
+SLIDE_WINDOM = 1
+
+THRESH_HOLD = 4
+# {key is sequence number, value is {data: data, ack: }}
+PACKETMAP = {}
+# check if finish read whole data
+END = False
+
+# Bind to localhost and an ephemeral port
+IP_PORT = sys.argv[1]
+UDP_IP = IP_PORT[0:IP_PORT.find(":")]
+UDP_PORT = int(IP_PORT[IP_PORT.find(":")+1:])
+dest = (UDP_IP, UDP_PORT)
+
+# Set up the socket
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM) 
+sock.settimeout(TIMEOUT)
+
+def log(string):
+  sys.stderr.write(datetime.datetime.now().strftime("%H:%M:%S.%f") + " " + string + "\n")
+
+# retransmit all packets that did not receive acks in this sliding window
+def retransmit():
+  global PACKETMAP
+  
+  for x in PACKETMAP.keys():
+    sequenceStart = x - len(PACKETMAP[x]["data"])
+    if (not (PACKETMAP[x]["ack"])): # x has not been acked, need to retransmit it
+      RT = PACKETMAP[x]["RT"]+1
+      PACKETMAP[x]["RT"] = RT
+      msg = json.dumps({"sequence": sequenceStart, "data": PACKETMAP[x]["data"], "ack": False, "eof": False, "RT": RT})
+      if sock.sendto(msg, dest) < len(msg):
+        log("[error] unable to fully send packet")
+      else:
+        log("[retransmit data] " + str(x) + " (" + str(len(PACKETMAP[x]["data"])) + ")")
+
+def send_next_packet():
+  global SEQUENCE
+  global PACKETMAP
+  
+  log("send next")
+  data = sys.stdin.read(DATA_SIZE)
+  #log(data)
+  if (len(data) > 0):
+    log("data size: :" + str(len(data)))
+    msg = json.dumps({"sequence": SEQUENCE, "data": data, "ack": False, "eof": False, "RT": 0})
+    assert (len(msg) <= 1472), "ERROR: Datagram is longer than 1472 bytes!!!"
+    SEQUENCE += len(data)
+    # record data for this sequence number
+    PACKETMAP[SEQUENCE] = {
+      "data": data,
+      "ack": False,
+      "time": time.time(), 
+      "RT": 0
+    }
+    if sock.sendto(msg, dest) < len(msg):
+      log("[error] unable to fully send packet")
+    else:
+      log("[send data] " + str(SEQUENCE) + " (" + str(len(data)) + ")")
+    return True
+  else:
+    return False  
+
+def packet_delayed(ack_packet):
+    return (not (PACKETMAP[decoded['ack']]["ack"])) and PACKETMAP[ack_packet['ack']]["RT"] > ack_packet["RT"]
+
+def packet_dropped(ack_packet):
+    return (not (PACKETMAP[decoded['ack']]["ack"])) and PACKETMAP[ack_packet['ack']]["RT"] == ack_packet["RT"] and not ack_packet["RT"]==0
+
+# Send first packet
+send_next_packet()
+
+# Now read in data, send packets
+while True:
+  log("ABOUT TO SLEEP")
+  # deal with timeout
+  
+  try:
+    result = sock.recvfrom(MSG_SIZE)
+    
+    if result:
+      (data, addr) = result
+      try:
+        decoded = json.loads(data)
+        # change timeout
+        #if decoded['ack'] in PACKETMAP:
+          
+
+        # if we never receive this ack, store in PACKETMAP's ack
+        if (decoded['ack'] in PACKETMAP) and (not (PACKETMAP[decoded['ack']]["ack"])):
+          TTL = time.time() - PACKETMAP[decoded['ack']]["time"]
+          log("TTL: " + str(TTL))
+          if packet_dropped(decoded):
+              TIMEOUT = 0.2
+              sock.settimeout(TIMEOUT)
+          elif packet_delayed(decoded):
+              TIMEOUT = max(TIMEOUT, 2)
+              sock.settimeout(TIMEOUT)
+          else:
+              TIMEOUT = TTL
+              sock.settimeout(TIMEOUT)
+          
+          # store the data length
+          PACKETMAP[decoded['ack']]["ack"] = True 
+          log("[recv ack] " + str(decoded['ack']))
+
+        # If we have recieve all ACKs for current sliding window, start second round
+
+        check = True
+        for key in PACKETMAP:
+          if not PACKETMAP[key]["ack"]:
+            check = False
+        if check and END:
+          log("finish all send and all ack")
+          break
+        if check:
+          log("send next round")
+          PACKETMAP = {}
+          # SLIDE_WINDOM = 6
+          if(SLIDE_WINDOM*2<THRESH_HOLD):
+              SLIDE_WINDOM *= 2
+          elif(SLIDE_WINDOM == THRESH_HOLD):
+              SLIDE_WINDOM +=1
+          else:
+              SLIDE_WINDOM = THRESH_HOLD
+          SLIDE_WINDOM += 1;
+          if (not send_next_packet()):
+            log("no data to read")
+            break
+          count = 0;
+          while count < SLIDE_WINDOM: 
+            if (not send_next_packet()):
+              log("no data to read")
+              END = True
+              break
+            count += 1
+
+            
+      except (ValueError, KeyError, TypeError):
+        log("[recv corrupt packet]")
+    else:
+      retransmit()
+
+  except socket.timeout as error:
+    log("[error] timeout")
+    print("TIMEOUT: " + str(TIMEOUT))
+    #sock.settimeout(2*TIMEOUT)
+    # halve the sliding window but do not lower than 1
+    if (SLIDE_WINDOM // 2) >= 1:
+      SLIDE_WINDOM = THRESH_HOLD // 2
+    retransmit()
+
+sock.sendto(json.dumps({"eof": True, "data": "", "sequence": SEQUENCE, "ack": False}), dest)
+sys.exit(0)

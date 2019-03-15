@@ -1,0 +1,94 @@
+#!/usr/bin/python -u
+#
+# Project 3 Starter Code
+#
+
+import sys
+import socket
+import time
+import datetime
+import select
+import json
+
+def log(string):
+  sys.stderr.write(datetime.datetime.now().strftime("%H:%M:%S.%f") + " " + string + "\n")
+
+MSG_SIZE = 1500
+TIMEOUT = 1
+ACK = 0
+# {key is sequence number, value is data}
+RECMAP = {}
+
+# record last ack address
+ADDR = 0
+
+# Bind to localhost and an ephemeral port
+UDP_IP = "127.0.0.1"
+UDP_PORT = 0
+
+# Set up the socket
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM) 
+sock.bind((UDP_IP, UDP_PORT))
+sock.settimeout(TIMEOUT)
+
+# Get port we bound to
+UDP_PORT = sock.getsockname()[1]
+log("[bound] " + str(UDP_PORT))
+
+# Now listen for packets
+while True:
+  try:
+    result = sock.recvfrom(MSG_SIZE)
+
+    # If nothing is ready, we hit the timeout
+    if result:
+      (data, addr) = result
+      ADDR = addr
+
+      try:
+        decoded = json.loads(data)
+
+        # If the EOF flag is set, exit
+        if (decoded['eof']):
+          log("[completed]")
+          sys.exit(0)
+
+        # If there is data, we accept it and print it out
+        if (decoded['data']):
+          # receive correct order packet we want
+          if decoded['sequence'] == ACK:
+            log("[print data] " + str(decoded['sequence']) + " (" + str(len(decoded['data'])) + ") ACCEPTED (in-order)")
+            sys.stdout.write(decoded['data'])
+            if (not (decoded['sequence'] in RECMAP)):
+              RECMAP[decoded['sequence']] = decoded['data']
+            ACK += len(decoded['data'])
+            # Send back an ack to the sender
+            msg = json.dumps({"ack": decoded['sequence'] + len(decoded['data']), "RT": decoded["RT"]})
+            log("ABOUT TO SEND " + msg)
+            if sock.sendto(msg, addr) < len(msg):
+              log("[error] unable to fully send packet")
+            # print all next acked data in order
+            log("current ACK: " + str(ACK))
+            while ACK in RECMAP:
+              log("[print store data] " + str(ACK) + " (" + str(len(RECMAP[ACK])) + ") ACCEPTED (in-order)")
+              sys.stdout.write(RECMAP[ACK]) # !!! print receving packet in order
+              ACK += len(RECMAP[ACK])
+          else:
+            log("current ACK: " + str(ACK))
+            log("current receive sequence : " + str(decoded['sequence']))
+            if (not (decoded['sequence'] in RECMAP)):
+              RECMAP[decoded['sequence']] = decoded['data']
+            # tell sender I receive it, but do not print it, because it is not order
+            log("[rec data] " + str(decoded['sequence']) + " (" + str(len(decoded['data'])) + ")")
+            msg = json.dumps({"ack": decoded['sequence'] + len(decoded['data']), "RT": decoded["RT"]})
+            log("ABOUT TO SEND " + msg)
+            if sock.sendto(msg, addr) < len(msg):
+              log("[error] unable to fully send packet")
+
+      except (ValueError, KeyError, TypeError) as e:
+        log("[recv corrupt packet]")
+        raise e
+      
+  except socket.timeout as error:
+    log("[error] timeout")
+    continue
